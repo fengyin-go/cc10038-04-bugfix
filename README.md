@@ -11,7 +11,7 @@
 .
 ├── frontend/                 Vue 3 + Vite + TypeScript 前端
 │   ├── src/views/WorkbenchView.vue|tsx  全部模块共享工作台
-│   ├── src/data/modules.ts              18个业务模块配置
+│   ├── src/data/modules.ts              21个业务模块配置
 │   ├── src/api/              统一请求封装
 │   └── vite.config.ts        dev server 配置（open: false）
 ├── backend/                  FastAPI（Python） 后端
@@ -70,6 +70,26 @@ npm run dev
 | 回溯重放引擎 | `replay_engine` | 重放任务 | 历史批次范围、新解析规则版本、重放状态 |
 | 聚合查询视图 | `aggregation_view` | 聚合视图 | 视图名称、聚合维度、指标定义 |
 | 采集血缘 | `data_lineage` | 血缘关系 | 来源批次、解析规则版本、标准化版本 |
+| 来源进度回执 | `progress_receipt` | 来源进度回执 | 回执编号、数据源、批次编号、采集区域、时间窗口 |
+
+## 来源进度回执（采集归属链路）
+
+回调端推进进度时不再直接写水位，而是沿采集数据流逐段核验归属：
+
+- 采集批次启动（`start_ingest_batch`）即按「数据源 + 批次编号 + 时间窗口」
+  签发来源进度回执（编号沿用批次尾号，如 `INGE-0004` → `RCPT-0004`），
+  并在待处理清单登记一条待确认项。
+- 回调确认（`POST /api/progress/confirm`）依次核验区域提交权限、回执与
+  数据源/批号/区域/窗口的一致性；换源、越权、伪造回执号一律拒绝，
+  取数位置不移动，但拒绝结论写入推进历史和待处理清单，可查可追溯。
+- 只有资格齐备的批次能推进该源下次取数位置（水位）；曾确认的批号再次
+  送达时指回上一次推进，不产生新的水位事件。
+- 采集入口（`POST /api/progress/next-window`）只读本源已确认回执，
+  计算「上次确认点之后」的采集起止时间；调用方经 `GET /api/progress/receipts`
+  只能读到本源的回执。
+- 跨源诊断角色（`cross_source_diagnostic`）可读各区域推进历史
+  （`GET /api/progress/diagnostic/region-history`），其任何写入均被拒绝。
+- 每个数据源有独立裁决锁，进度提交与归属确认并发时串行处理。
 
 ## 约定
 

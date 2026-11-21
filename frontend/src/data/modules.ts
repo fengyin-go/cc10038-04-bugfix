@@ -222,6 +222,17 @@ export const MODULES: ModuleMeta[] = [
     actionTargets: {"验证血缘": "已记录", "标记断裂": "验证异常"},
     metrics: ["血缘条目数", "已验证血缘", "断裂血缘"],
   },
+  {
+    key: "progress_receipt",
+    name: "来源进度回执",
+    entity: "来源进度回执",
+    desc: "按接入源签发可信回执、核验回调归属并裁决下次取数位置",
+    fields: ["receipt_no", "source_id", "batch_no", "region", "window_start", "window_end", "status"],
+    statuses: ["待确认", "已确认", "归属冲突", "重复确认"],
+    actions: [],
+    actionTargets: {},
+    metrics: ["回执总数", "已确认回执", "归属冲突数"],
+  },
 ]
 
 export const MODULE_BY_KEY: Map<string, ModuleMeta> = new Map(

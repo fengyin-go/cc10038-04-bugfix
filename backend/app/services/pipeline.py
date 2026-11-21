@@ -11,6 +11,7 @@ import time
 from typing import Any
 
 from app.store import store
+from app.services.progress_receipt import progress_receipt_service
 
 
 def _now_iso() -> str:
@@ -69,8 +70,16 @@ class IngestPipeline:
         source_id: str,
         time_window: str,
         raw_logs: list[dict[str, Any]] | None = None,
+        *,
+        window_start: str | None = None,
+        window_end: str | None = None,
     ) -> dict[str, Any]:
-        """启动采集批次：登记批次并为其生成原始日志记录。"""
+        """启动采集批次：登记批次并为其生成原始日志记录。
+
+        采集入口先读取本源的来源进度回执，按「上次确认点之后」计算本次采集
+        时间范围，避免从错误位置开始取数；批次落库后立即签发归属本批次的
+        来源进度回执，作为回调确认的唯一可信凭证。
+        """
         sources = store.rows("source_registry")
         source_entry = None
         for s in sources:
@@ -88,6 +97,12 @@ class IngestPipeline:
             if b.get("所属数据源") == source_id and b.get("status") in ("待采集", "采集中"):
                 return {"ok": False, "message": f"数据源 {source_id} 已有进行中的批次 {b.get('批次编号')}", "batch": b}
 
+        # 读取来源进度回执，计算上次确认点之后的采集范围。
+        region = source_entry.get("采集区域") or "default"
+        effective_window_end = window_end or time_window
+        plan = progress_receipt_service.plan_ingest_window(source_id, effective_window_end)
+        effective_window_start = window_start if window_start is not None else plan["window_start"]
+
         batch_no = f"INGE-{_next_id('ingest_batch'):04d}"
         batch_entry = {
             "id": _next_id("ingest_batch"),
@@ -102,8 +117,24 @@ class IngestPipeline:
             "batch_version": 1,
             "source_version": source_entry.get("source_version", 1),
             "started_at": _now_iso(),
+            "region": region,
+            "window_start": effective_window_start,
+            "window_end": effective_window_end,
+            "ingest_from_confirmation": plan["has_confirmation_point"],
+            "from_receipt": plan.get("from_receipt", ""),
         }
         batches.append(batch_entry)
+
+        # 为该接入源的该批次签发可信来源进度回执（沿用既有批次编号派生）。
+        receipt_result = progress_receipt_service.issue_receipt(
+            source_id,
+            batch_no,
+            effective_window_start,
+            effective_window_end,
+            region,
+        )
+        if receipt_result["ok"]:
+            batch_entry["receipt_no"] = receipt_result["receipt"]["receipt_no"]
 
         # 生成原始日志记录
         raw_records_list = store.rows("raw_records")
@@ -135,6 +166,13 @@ class IngestPipeline:
             "message": f"采集批次 {batch_no} 已启动",
             "batch": batch_entry,
             "record_count": len(created_ids),
+            "receipt_no": batch_entry.get("receipt_no", ""),
+            "window_plan": {
+                "window_start": effective_window_start,
+                "window_end": effective_window_end,
+                "from_receipt": plan.get("from_receipt", ""),
+                "has_confirmation_point": plan["has_confirmation_point"],
+            },
         }
 
     # ---------- 阶段2：字段解析 ----------
@@ -521,13 +559,45 @@ class IngestPipeline:
         }
 
     # ---------- 水位管理 ----------
+    def confirm_ingest_progress(
+        self,
+        *,
+        source_id: str,
+        batch_no: str,
+        receipt_no: str,
+        region: str,
+        role: str,
+        claimed_window_end: str | None = None,
+    ) -> dict[str, Any]:
+        """回调端确认采集进度：由来源进度回执裁决归属与取数位置推进。
+
+        所有跨源/跨区域的回调批号都在这里核验，只有确有资格的批次能改变
+        本源下次取数位置；归属冲突的请求返回可查结论且不移动水位。
+        """
+        return progress_receipt_service.confirm_progress(
+            source_id=source_id,
+            batch_no=batch_no,
+            receipt_no=receipt_no,
+            region=region,
+            role=role,
+            claimed_window_end=claimed_window_end,
+        )
+
+    def next_ingest_window(self, source_id: str, window_end: str) -> dict[str, Any]:
+        """采集批次入口：读取本源回执，计算上次确认点之后的采集范围。"""
+        return progress_receipt_service.plan_ingest_window(source_id, window_end)
+
     def advance_watermark(
         self,
         source_id: str,
         batch_no: str,
         watermark_value: str,
     ) -> dict[str, Any]:
-        """推进指定数据源的采集水位，并防止倒退。"""
+        """直接推进指定数据源的采集水位（保留兼容入口）。
+
+        新的回调确认链路应走 confirm_ingest_progress，由来源进度回执核验
+        批次归属后再推进；本接口仅做防倒退保护，不校验来源归属。
+        """
         watermarks = store.rows("watermark_mgr")
         existing = None
         for w in watermarks:
@@ -697,8 +767,15 @@ class IngestPipeline:
         export_result = self.build_export(f"view-{batch_no}", "csv")
         steps["export"] = export_result
 
-        # S7: 水位推进
-        wm_result = self.advance_watermark(source_id, batch_no, time_window)
+        # S7: 进度确认（通过来源进度回执裁决，而非直接写水位）
+        receipt_no = batch_result["batch"].get("receipt_no", "")
+        wm_result = progress_receipt_service.confirm_progress(
+            source_id=source_id,
+            batch_no=batch_no,
+            receipt_no=receipt_no,
+            region="default",
+            role="system-ingest",
+        )
         steps["watermark"] = wm_result
 
         return {

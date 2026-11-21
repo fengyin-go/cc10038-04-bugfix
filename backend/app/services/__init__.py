@@ -22,6 +22,7 @@ from app.services.data_export import DataExportService
 from app.services.replay_engine import ReplayEngineService
 from app.services.aggregation_view import AggregationViewService
 from app.services.data_lineage import DataLineageService
+from app.services.progress_receipt_module import ProgressReceiptModuleService
 
 SERVICES: dict[str, BaseModuleService] = {
     "source_registry": SourceRegistryService(),
@@ -44,6 +45,7 @@ SERVICES: dict[str, BaseModuleService] = {
     "replay_engine": ReplayEngineService(),
     "aggregation_view": AggregationViewService(),
     "data_lineage": DataLineageService(),
+    "progress_receipt": ProgressReceiptModuleService(),
 }
 
 
